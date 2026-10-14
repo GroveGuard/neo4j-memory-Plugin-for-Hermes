@@ -4,6 +4,7 @@
   stats         node counts per label + embedding-model marker
   dream         duplicate report; --apply merges the safe (exact-name) pairs
   reembed       recompute entity vectors after an embedding-model change
+  digest        build the always-on core digest for the system prompt (--write to save)
   query         read-only Cypher (no argument = schema + examples)
   install-cron  create (or --update) the nightly dreaming job in Hermes' cron scheduler
   merge / reject / search / tool   the same operations the agent tools offer, for cron agents
@@ -83,11 +84,39 @@ def _run(creds, cypher, render) -> None:
         print(f"Connection failed: {type(exc).__name__}: {exc}")
 
 
+def _builtin_report() -> None:
+    try:
+        core = _core()
+        home = core._hermes_home()
+        st = core._builtin_memory_state(home)
+    except Exception as exc:
+        print(f"Built-in memory: could not be determined ({type(exc).__name__})")
+        return
+    mem_on, user_on = st["memory_enabled"], st["user_profile_enabled"]
+    if st["standalone"]:
+        mode = "OFF (this plugin is the only persistent memory)"
+    elif user_on and not mem_on:
+        mode = "PARTLY on: user profile (USER.md) on, MEMORY.md off (this plugin holds everything else)"
+    else:
+        mode = "on (this plugin complements it)"
+    print(f"Built-in memory: {mode}" + ("" if st["known"] else "  [config.yaml not readable, assuming defaults]"))
+    if st["toolset_disabled"]:
+        print("WARNING: 'memory' is listed in agent.disabled_toolsets. Hermes then also HIDES the tools of external "
+              "memory providers. Remove it there and set memory.memory_enabled: false and "
+              "memory.user_profile_enabled: false instead.")
+    digest = home / core.DIGEST_FILE
+    if not mem_on:
+        print("Core digest: " + (f"{digest.stat().st_size} bytes, updated "
+                                 f"{__import__('datetime').datetime.fromtimestamp(digest.stat().st_mtime):%Y-%m-%d %H:%M}"
+                                 if digest.exists() else "not created yet (run `hermes neo4j-memory digest --write`)"))
+
+
 def _status(args) -> None:
     creds = _credentials()
     if creds:
         _run(creds, "MATCH (n) RETURN count(n) AS nodes",
              lambda rows: print(f"Connected. Nodes in graph: {rows[0]['nodes']}"))
+    _builtin_report()
 
 
 def _stats(args) -> None:
@@ -216,6 +245,18 @@ def _search(args) -> None:
 _TOOLS = ("neo4j_memory_search", "neo4j_memory_remember", "neo4j_memory_update", "neo4j_memory_forget")
 
 
+def _digest(args) -> None:
+    provider = _provider(args)
+    try:
+        res = provider.cli_digest(write=args.write)
+        text = res.pop("text", "")
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        if not args.write:
+            print("\n--- preview (use --write to save) ---\n" + text)
+    finally:
+        provider.shutdown()
+
+
 def _query_cmd(args) -> None:
     provider = _provider(args)
     try:
@@ -248,8 +289,13 @@ def _tool(args) -> None:
 
 
 def _install_cron(args) -> None:
-    prompt = _core().DREAM_PROMPT
-    schedule = f"{int(args.minute)} {int(args.hour)} * * *"
+    every = int(args.every_hours or 0)
+    if every:
+        schedule = f"{int(args.minute)} */{every} * * *"
+        prompt = _core().dream_prompt(every + 1)      # one hour of overlap; the agent searches before adding
+    else:
+        schedule = f"{int(args.minute)} {int(args.hour)} * * *"
+        prompt = _core().dream_prompt(24)
     base = [shutil.which("hermes") or "hermes"]
     if args.profile:
         base += ["-p", args.profile]
@@ -275,7 +321,7 @@ def _dispatch(args) -> None:
     {
         "status": _status, "stats": _stats, "dream": _dream, "reembed": _reembed,
         "install-cron": _install_cron, "merge": _merge, "reject": _reject,
-        "search": _search, "tool": _tool, "query": _query_cmd,
+        "search": _search, "tool": _tool, "query": _query_cmd, "digest": _digest,
     }.get(getattr(args, "neo4j_memory_cmd", None) or "status", _status)(args)
 
 
@@ -303,6 +349,8 @@ def register_cli(subparser) -> None:
     search = with_user(subs.add_parser("search", help="Search entities and preferences"))
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=5)
+    digest = with_user(subs.add_parser("digest", help="Build the core digest for the system prompt"))
+    digest.add_argument("--write", action="store_true", help="save it (default: preview only)")
     query = with_user(subs.add_parser("query", help="Read-only Cypher; without an argument: schema and examples"))
     query.add_argument("cypher", nargs="?", default="")
     query.add_argument("--params", default="", help='JSON object, e.g. \'{"name": "Maya"}\'')
@@ -314,6 +362,7 @@ def register_cli(subparser) -> None:
     cron = subs.add_parser("install-cron", help="Create or update the nightly dreaming job in Hermes cron")
     cron.add_argument("--hour", default="3")
     cron.add_argument("--minute", default="30")
+    cron.add_argument("--every-hours", type=int, default=0, help="run every N hours instead of daily (e.g. 6)")
     cron.add_argument("--profile", default="", help="Hermes profile to create the job in")
     cron.add_argument("--update", action="store_true", help="replace prompt/schedule of the existing job")
     cron.add_argument("--apply", action="store_true", help="actually run the command (default: dry run)")

@@ -1,4 +1,4 @@
-# neo4j-memory (Hermes memory provider) v0.4.2
+# neo4j-memory (Hermes memory provider) v0.5.1
 
 Direct Bolt connection to Neo4j AuraDB through the official `neo4j-agent-memory` SDK.
 No MCP, no `npx`, no runtime edits of `plugin.yaml`.
@@ -26,16 +26,53 @@ Preferences from <= 0.1.x use other `user_identifier`s and are not read (re-crea
 ## Tools
 | Tool | Purpose |
 |---|---|
-| `neo4j_memory_search` | entities by meaning **and** keywords (hybrid, optional `type` filter) + this profile's preferences; says so when nothing matches |
+| `neo4j_memory_search` | entities by meaning **and** keywords (hybrid, optional `type` and `since`/`until` filter on the learned date) + this profile's preferences; says so when nothing matches |
 | `neo4j_memory_remember` | entities (POLE+O), relationships, preferences; existing ones reused, not overwritten |
 | `neo4j_memory_update` | change an entity description / replace a preference (`supersede_preference`) |
 | `neo4j_memory_forget` | delete an entity (with relationships) or a preference; ambiguous names delete nothing |
 | `neo4j_memory_query` | read-only Cypher; without arguments returns schema + examples. Cron sessions, or `NEO4J_MEMORY_QUERY_TOOL=1` |
-| `neo4j_memory_maintain` | only where the runtime loads provider tools in cron sessions (or `NEO4J_MEMORY_MAINTENANCE_TOOLS=1`): `report` / `merge` / `reject` |
+| `neo4j_memory_maintain` | only where the runtime loads provider tools in cron sessions (or `NEO4J_MEMORY_MAINTENANCE_TOOLS=1`): `report` / `merge` / `reject` / `digest` |
 
 Update/forget/merge results are verified by re-reading the graph (`failed` instead of a false success).
 The SDK has no `update_entity`/`delete_entity`/`delete_preference`, so these use Cypher via `client.graph`
 (the SDK says this accessor is being retired in favour of NAMS' `query.cypher`).
+
+## Running without Hermes' built-in memory (0.5.0)
+The built-in `MEMORY.md`/`USER.md` give Hermes (a) an always-present snapshot in the system prompt, (b) a
+security scan, and (c) a write path for its background self-improvement review. Switching it off removes all
+three, so this plugin now provides them.
+
+**How to switch it off correctly** (`$HERMES_HOME/config.yaml`):
+```yaml
+memory:
+  provider: neo4j-memory
+  memory_enabled: false
+  user_profile_enabled: false
+```
+Do **not** list `memory` under `agent.disabled_toolsets` (that is what `hermes tools disable memory` does):
+per the Hermes docs this also hides the tools of external providers. `hermes neo4j-memory status` reads the
+file, tells you whether the built-in stores are off and warns about that toolset.
+
+| Built-in feature | Replacement here |
+|---|---|
+| Frozen snapshot in the system prompt | **Core digest**: `hermes neo4j-memory digest --write` (also the last step of the dreaming job) writes `$HERMES_HOME/neo4j-memory-digest.md` from the graph (preferences incl. mirrored old built-in notes, most connected topics, `NEO4J_MEMORY_DIGEST_CHARS`, default 1500). It is read from the local file at session start (no network, stable prompt prefix) and only used when the built-in memory is off (or `NEO4J_MEMORY_DIGEST=1`). It changes between sessions, like the built-in snapshot |
+| Security scan | **Memory defense** on every write (`remember`, `update`, mirrored writes, optional raw turns) and again on recall/digest: secrets are redacted (private keys, AWS/GitHub/Slack/OpenAI-style keys, JWT, bearer tokens, connection strings, `password=`/`token=` assignments, IBAN with checksum, credit cards with Luhn), invisible Unicode is stripped, prompt-injection/exfiltration phrases (EN/DE) are blocked. `NEO4J_MEMORY_DEFENSE=redact` (default) / `block` / `off`; `NEO4J_MEMORY_DEFENSE_PII=1` also redacts e-mail addresses and phone numbers. Pattern lists are heuristics, not a guarantee |
+| Prompt wording | In standalone mode the system prompt tells the agent to save proactively (user profile, people, projects, decisions, corrections) and to skip trivia |
+| Background review writes | See below |
+
+**Hermes' background review** (the self-improvement pass after a turn) wrote to the built-in memory. It may use
+extra tools you whitelist (`auxiliary.background_review.extra_tools`, see the Hermes memory docs):
+```yaml
+auxiliary:
+  background_review:
+    extra_tools:
+      - neo4j_memory_remember
+      - neo4j_memory_search
+```
+Keep the list narrow (no `forget`/`update`). Whether Hermes' review prompt actually calls them is unverified:
+check afterwards with `hermes neo4j-memory query "MATCH (e:Entity) WHERE e.hermes_origin = 'review' RETURN e.name LIMIT 10"`.
+Writes made from the review fork are tagged `hermes_origin = review`. Without it, the nightly job is the only
+automatic capture; run it more often with `hermes neo4j-memory install-cron --every-hours 6 --update --apply`.
 
 ## What 0.4.0 took from neo4j-graphrag-python
 Patterns re-implemented on top of `neo4j-agent-memory` (no extra dependency; `neo4j-graphrag` would duplicate the SDK).
@@ -115,3 +152,10 @@ else from `.../profiles/<name>`, else `default`. Entities are shared across prof
 ## Not included
 Automatic extraction inside the plugin (the nightly agent job does it), relationship delete/update tools,
 export/backup, entity scoping per profile.
+
+## Development
+Work happens in the GitHub repo (`GroveGuard/neo4j-memory-Plugin-for-Hermes`). The tests run against stubs of Hermes,
+`neo4j-agent-memory` and the Neo4j driver (they check the plugin's logic, **not** the real SDK or a real database):
+```
+python tests/run_all.py
+```
