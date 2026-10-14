@@ -1,0 +1,12 @@
+name: neo4j-memory
+version: 0.4.2
+description: "Hermes memory provider backed by Neo4j AuraDB via the official neo4j-agent-memory SDK (direct Bolt, no MCP). Hybrid (vector + full-text) retrieval, relationship vocabulary, read-only Cypher tool, nightly dreaming loop."
+python_dependencies:
+  - "neo4j-agent-memory[sentence-transformers]"
+  - "httpx>=0.27"
+hooks:
+  - prefetch
+  - queue_prefetch
+  - sync_turn
+  - on_memory_write
+  - shutdown
