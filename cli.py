@@ -248,11 +248,13 @@ _TOOLS = ("neo4j_memory_search", "neo4j_memory_remember", "neo4j_memory_update",
 def _digest(args) -> None:
     provider = _provider(args)
     try:
-        res = provider.cli_digest(write=args.write)
-        text = res.pop("text", "")
+        profiles = [x for x in (args.profiles or "").split(",") if x.strip()] or None
+        res = provider.cli_digest(write=args.write, profiles=profiles)
+        previews = [(t["profile"], t.pop("text", "")) for t in res["targets"]]
         print(json.dumps(res, ensure_ascii=False, indent=2))
         if not args.write:
-            print("\n--- preview (use --write to save) ---\n" + text)
+            for name, text in previews:
+                print(f"\n--- preview for profile '{name}' (use --write to save) ---\n{text}")
     finally:
         provider.shutdown()
 
@@ -351,6 +353,7 @@ def register_cli(subparser) -> None:
     search.add_argument("--limit", type=int, default=5)
     digest = with_user(subs.add_parser("digest", help="Build the core digest for the system prompt"))
     digest.add_argument("--write", action="store_true", help="save it (default: preview only)")
+    digest.add_argument("--profiles", default="", help="comma list of profiles (default: NEO4J_MEMORY_DIGEST_PROFILES or this one)")
     query = with_user(subs.add_parser("query", help="Read-only Cypher; without an argument: schema and examples"))
     query.add_argument("cypher", nargs="?", default="")
     query.add_argument("--params", default="", help='JSON object, e.g. \'{"name": "Maya"}\'')

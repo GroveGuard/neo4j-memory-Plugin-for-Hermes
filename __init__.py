@@ -1,4 +1,4 @@
-"""Neo4j memory provider for Hermes Agent (v0.5.1).
+"""Neo4j memory provider for Hermes Agent (v0.5.2).
 
 Talks directly to Neo4j (AuraDB) through the official ``neo4j-agent-memory``
 SDK over Bolt. No MCP layer, no ``npx`` server, no runtime patching of
@@ -59,6 +59,10 @@ Optional : NEO4J_DATABASE
            NEO4J_MEMORY_DEFENSE_PII          (1 = also redact e-mail addresses and phone numbers)
            NEO4J_MEMORY_STANDALONE           (1/0 = force "built-in memory is off/on"; default: read config.yaml)
            NEO4J_MEMORY_DIGEST_CHARS         (max size of the system-prompt digest; default 1500)
+           NEO4J_MEMORY_DIGEST_TOPICS        (0 [default] = preferences only; N = also list the N best-connected entities)
+           NEO4J_MEMORY_DIGEST_EXCLUDE       (comma list of preference categories to keep out of the digest)
+           NEO4J_MEMORY_DIGEST_PROFILES      (comma list of profiles whose digest this process writes; default: its own.
+                                              Set it in the curator profile, e.g. "default,clippy")
            $HERMES_HOME/neo4j-memory-schema.json  (optional relationship vocabulary override)
 """
 
@@ -90,7 +94,7 @@ except Exception:  # pragma: no cover - older Hermes / standalone testing
 logger = logging.getLogger(__name__)
 
 PROVIDER_NAME = "neo4j-memory"
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 ENTITY_TYPES = ["PERSON", "ORGANIZATION", "LOCATION", "EVENT", "OBJECT"]  # POLE+O
 
 DEFAULT_EMBEDDING = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # 384 dims, de+en
@@ -206,7 +210,8 @@ LOCATION, EVENT, OBJECT). At most 15 new items.
 5. CORRECTIONS: if newer information clearly contradicts a stored description or preference, "update" it \
 ({"entity_name":"..","new_description":".."}); use "forget" ({"entity_name":".."}) only for facts that are plainly \
 wrong.
-6. DIGEST: as the very last step refresh the always-on core digest ("digest"). Refreshing it does not count as a change.
+6. DIGEST: as the very last step refresh the always-on core digest ("digest"; it covers every profile listed in \
+NEO4J_MEMORY_DIGEST_PROFILES). Refreshing it does not count as a change.
 
 If you changed nothing and the report has no warning, your ENTIRE reply must be exactly [SILENT] - no \
 explanation. Otherwise reply with a summary of at most 8 lines in German: merged pairs, new items, corrections, \
@@ -779,6 +784,7 @@ class Neo4jMemoryProvider(MemoryProvider):
             "entity description or preference, `neo4j_memory_forget` to delete one. "
             "Prefer these relationship types: " + ", ".join(self._schema.get("relationship_types", {})) + ". "
             "Store curated facts only, never raw chat transcripts and never secrets (they are redacted automatically). "
+            "Write each preference as one short factual sentence: no interpretation, anecdotes or jokes. "
             "If a search finds nothing, say so instead of guessing."
         )
         if self._query_tool:
@@ -934,6 +940,8 @@ class Neo4jMemoryProvider(MemoryProvider):
                         "action": {"type": "string", "enum": ["report", "merge", "reject", "digest"]},
                         "keep_id": {"type": "string"},
                         "drop_id": {"type": "string"},
+                        "profiles": {"type": "array", "items": {"type": "string"},
+                                     "description": "digest only: profiles to refresh (default: NEO4J_MEMORY_DIGEST_PROFILES or this one)"},
                     },
                     "required": ["action"],
                 },
@@ -1114,8 +1122,8 @@ class Neo4jMemoryProvider(MemoryProvider):
 
     # ------------------------------------------- CLI helpers (sync wrappers)
 
-    def cli_digest(self, write: bool = True) -> Dict[str, Any]:
-        return self._run(self._a_digest(write=write), ADMIN_TIMEOUT)
+    def cli_digest(self, write: bool = True, profiles: Optional[List[str]] = None) -> Dict[str, Any]:
+        return self._run(self._a_digest(write=write, profiles=profiles), ADMIN_TIMEOUT)
 
     def cli_ready(self) -> None:
         """Block until the connection is up (first start may download the embedding model)."""
@@ -1937,53 +1945,107 @@ class Neo4jMemoryProvider(MemoryProvider):
 
     # -- core digest (replaces the frozen USER.md/MEMORY.md snapshot) -----------------
 
-    async def _a_digest(self, write: bool = True) -> Dict[str, Any]:
-        client = await self._get_client()
-        prefs = list(await client.long_term.get_preferences_for(self._uid) or [])
+    def _digest_profiles(self, profiles: Optional[List[str]]) -> List[str]:
+        raw = [str(x) for x in profiles] if profiles else _env("NEO4J_MEMORY_DIGEST_PROFILES").split(",")
+        names: List[str] = []
+        for x in raw:
+            name = re.sub(r"[^\w.-]", "_", x.strip())
+            if name and name not in names:
+                names.append(name)
+        return names or [self._profile]
+
+    def _profile_home(self, name: str) -> Path:
+        """Home of a Hermes profile: <root> for 'default', <root>/profiles/<name> otherwise."""
+        root = self._home.parent.parent if self._home.parent.name == "profiles" else self._home
+        return root if name == "default" else root / "profiles" / name
+
+    async def _build_digest(self, client: Any, profile: str, home: Path) -> Dict[str, Any]:
+        """Digest text for one profile: its preferences (scoped <user>:<profile>), minus what the prompt already has."""
+        uid = f"{self._user}:{profile}"
+        prefs = list(await client.long_term.get_preferences_for(uid) or [])
+        state = _builtin_memory_state(home)
+        user_md = ""
+        if state["user_profile_enabled"]:                     # USER.md is already in that profile's prompt
+            try:
+                user_md = (home / "memories" / "USER.md").read_text(encoding="utf-8")
+            except Exception:
+                user_md = ""
+        user_tokens = _tokens(user_md)
+        exclude = {c.strip().casefold() for c in _env("NEO4J_MEMORY_DIGEST_EXCLUDE").split(",") if c.strip()}
         own = [p for p in prefs if not str(getattr(p, "category", "")).startswith("hermes_")]
         mirrored = [p for p in prefs if str(getattr(p, "category", "")).startswith("hermes_")]
-        if self._builtin.get("user_profile_enabled"):     # USER.md is already in the prompt: do not repeat it
-            mirrored = [p for p in mirrored if str(getattr(p, "category", "")) != "hermes_user"]
+        dropped_dup = dropped_excl = 0
         lines: List[str] = []
-        if own or mirrored:
-            lines.append("About the user and working conventions:")
-            for p in own + mirrored:
-                cat = str(getattr(p, "category", "")).replace("hermes_", "", 1)
-                lines.append(f"- [{cat}] {_clip(getattr(p, 'preference', ''), 200)}")
-        rows = _rows(await self._graph(client).execute_read(
-            "MATCH (e:Entity) WHERE e.merged_into IS NULL "
-            "RETURN e.name AS name, e.type AS type, e.description AS description, COUNT { (e)--() } AS degree "
-            "ORDER BY degree DESC LIMIT 12"))
-        core = sorted([r for r in rows if r.get("degree")], key=lambda r: -(r.get("degree") or 0))[:8]
-        if core:
-            lines.append("Most connected topics:")
-            for r in core:
-                d = _clip(r.get("description"), 90)
-                lines.append(f"- {r['name']} ({_etype(r.get('type'))})" + (f": {d}" if d else ""))
+        for p in own + mirrored:
+            category = str(getattr(p, "category", ""))
+            text = _clip(getattr(p, "preference", ""), 200)
+            if category.casefold() in exclude or category.replace("hermes_", "", 1).casefold() in exclude:
+                dropped_excl += 1
+                continue
+            toks = _tokens(text)
+            if state["user_profile_enabled"] and (
+                    category == "hermes_user"
+                    or (len(toks) >= 3 and len(toks & user_tokens) / len(toks) >= 0.7)):
+                dropped_dup += 1                              # already part of USER.md
+                continue
+            lines.append(f"- [{category.replace('hermes_', '', 1)}] {text}")
+        out: List[str] = (["About the user and working conventions:"] + lines) if lines else []
+        try:
+            n_topics = max(0, min(int(_env("NEO4J_MEMORY_DIGEST_TOPICS", "0")), 12))
+        except ValueError:
+            n_topics = 0
+        topics = 0
+        if n_topics:
+            rows = _rows(await self._graph(client).execute_read(
+                "MATCH (e:Entity) WHERE e.merged_into IS NULL "
+                "RETURN e.name AS name, e.type AS type, e.description AS description, COUNT { (e)--() } AS degree "
+                "ORDER BY degree DESC LIMIT 12"))
+            core = sorted([r for r in rows if r.get("degree")], key=lambda r: -(r.get("degree") or 0))[:n_topics]
+            if core:
+                out.append("Most connected topics:")
+                for r in core:
+                    d = _clip(r.get("description"), 90)
+                    out.append(f"- {r['name']} ({_etype(r.get('type'))})" + (f": {d}" if d else ""))
+                topics = len(core)
         try:
             cap = int(_env("NEO4J_MEMORY_DIGEST_CHARS", "1500"))
         except ValueError:
             cap = 1500
-        text = _trim(_sanitize_recall("\n".join(lines), self._pii), cap)
-        path = self._home / DIGEST_FILE
-        result: Dict[str, Any] = {"path": str(path), "chars": len(text), "preferences": len(own) + len(mirrored),
-                                  "topics": len(core), "text": text}
-        if not write:
-            result["status"] = "preview"
-            return result
-        if not text.strip():
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-            result["status"] = "empty"
-            return result
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(text + "\n", encoding="utf-8")
-        os.replace(tmp, path)
-        result["status"] = "written"
-        return result
+        text = _trim(_sanitize_recall(chr(10).join(out), self._pii), cap)
+        return {"profile": profile, "text": text, "chars": len(text), "preferences": len(lines), "topics": topics,
+                "dropped_duplicates": dropped_dup, "dropped_excluded": dropped_excl}
+
+    async def _a_digest(self, write: bool = True, profiles: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Build (and write) the core digest for one or more profiles. Files are only written into existing profile homes."""
+        client = await self._get_client()
+        targets: List[Dict[str, Any]] = []
+        for name in self._digest_profiles(profiles):
+            home = self._profile_home(name)
+            if not home.is_dir():
+                targets.append({"profile": name, "status": "skipped", "path": str(home),
+                                "error": "profile home not found (the digest is only written into existing profiles)"})
+                continue
+            t = await self._build_digest(client, name, home)
+            path = home / DIGEST_FILE
+            t["path"] = str(path)
+            if not write:
+                t["status"] = "preview"
+            elif not t["text"].strip():
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                t["status"] = "empty"
+            else:
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(t["text"] + chr(10), encoding="utf-8")
+                os.replace(tmp, path)
+                t["status"] = "written"
+            targets.append(t)
+        statuses = {t["status"] for t in targets}
+        overall = "written" if "written" in statuses else ("preview" if "preview" in statuses else
+                  ("empty" if "empty" in statuses else "skipped"))
+        return {"status": overall, "targets": targets}
 
     # -- dreaming loop --------------------------------------------------------
 
@@ -1992,8 +2054,10 @@ class Neo4jMemoryProvider(MemoryProvider):
         if action == "report":
             return await self._a_dream_report(semantic=True)
         if action == "digest":
-            res = await self._a_digest(write=True)
-            res.pop("text", None)
+            profiles = args.get("profiles") if isinstance(args.get("profiles"), list) else None
+            res = await self._a_digest(write=True, profiles=profiles)
+            for t in res.get("targets", []):
+                t.pop("text", None)
             return res
         keep, drop = _clip(args.get("keep_id"), 64), _clip(args.get("drop_id"), 64)
         if action == "merge":

@@ -1,4 +1,4 @@
-# neo4j-memory (Hermes memory provider) v0.5.1
+# neo4j-memory (Hermes memory provider) v0.5.2
 
 Direct Bolt connection to Neo4j AuraDB through the official `neo4j-agent-memory` SDK.
 No MCP, no `npx`, no runtime edits of `plugin.yaml`.
@@ -55,10 +55,16 @@ file, tells you whether the built-in stores are off and warns about that toolset
 
 | Built-in feature | Replacement here |
 |---|---|
-| Frozen snapshot in the system prompt | **Core digest**: `hermes neo4j-memory digest --write` (also the last step of the dreaming job) writes `$HERMES_HOME/neo4j-memory-digest.md` from the graph (preferences incl. mirrored old built-in notes, most connected topics, `NEO4J_MEMORY_DIGEST_CHARS`, default 1500). It is read from the local file at session start (no network, stable prompt prefix) and only used when the built-in memory is off (or `NEO4J_MEMORY_DIGEST=1`). It changes between sessions, like the built-in snapshot |
+| Frozen snapshot in the system prompt | **Core digest**: `hermes neo4j-memory digest --write` (also the last step of the dreaming job) writes `$HERMES_HOME/neo4j-memory-digest.md` from the graph: the profile's preferences (`user:profile` scope), minus entries that only repeat `USER.md` (token overlap) and categories in `NEO4J_MEMORY_DIGEST_EXCLUDE`; optionally the N best-connected entities (`NEO4J_MEMORY_DIGEST_TOPICS`, default 0, because hubs are often import artefacts). Size cap `NEO4J_MEMORY_DIGEST_CHARS` (1500). It is read from the local file at session start (no network, stable prompt prefix) and used when MEMORY.md is off (or `NEO4J_MEMORY_DIGEST=1`). It changes between sessions, like the built-in snapshot |
 | Security scan | **Memory defense** on every write (`remember`, `update`, mirrored writes, optional raw turns) and again on recall/digest: secrets are redacted (private keys, AWS/GitHub/Slack/OpenAI-style keys, JWT, bearer tokens, connection strings, `password=`/`token=` assignments, IBAN with checksum, credit cards with Luhn), invisible Unicode is stripped, prompt-injection/exfiltration phrases (EN/DE) are blocked. `NEO4J_MEMORY_DEFENSE=redact` (default) / `block` / `off`; `NEO4J_MEMORY_DEFENSE_PII=1` also redacts e-mail addresses and phone numbers. Pattern lists are heuristics, not a guarantee |
 | Prompt wording | In standalone mode the system prompt tells the agent to save proactively (user profile, people, projects, decisions, corrections) and to skip trivia |
 | Background review writes | See below |
+
+**Digest and profiles.** The digest file lives in each profile's home and is built from that profile's preferences. If a
+dedicated curator profile runs the nightly job, tell it which profiles to refresh (profile homes must already exist; unknown
+names are skipped, never created): put `NEO4J_MEMORY_DIGEST_PROFILES=default,clippy` into the curator profile's `.env`, or run
+`hermes neo4j-memory digest --write --profiles default,clippy`. Use the same `NEO4J_MEMORY_USER` everywhere, otherwise the CLI/cron
+identity (`default:<profile>`) differs from live sessions and sees different preferences (`--user NAME` selects one for a single call).
 
 **Hermes' background review** (the self-improvement pass after a turn) wrote to the built-in memory. It may use
 extra tools you whitelist (`auxiliary.background_review.extra_tools`, see the Hermes memory docs):

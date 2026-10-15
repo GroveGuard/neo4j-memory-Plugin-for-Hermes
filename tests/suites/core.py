@@ -117,7 +117,6 @@ p.shutdown()
 
 print("== CLI")
 spec = importlib.util.spec_from_file_location("cli_under_test", "plug/cli_plugin.py"); cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
-cli_core_path = os.path.abspath("plug"); 
 import shutil; os.makedirs("plug_dir", exist_ok=True); shutil.copy("plug/neo4j_memory_plugin.py", "plug_dir/__init__.py"); shutil.copy("plug/cli_plugin.py", "plug_dir/cli.py")
 spec = importlib.util.spec_from_file_location("cli_dir", "plug_dir/cli.py"); cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
 s = sdk.Store(); s.meta["embedding_model"] = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
