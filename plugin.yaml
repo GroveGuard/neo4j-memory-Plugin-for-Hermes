@@ -1,8 +1,8 @@
 name: neo4j-memory
-version: 0.5.2
+version: 0.6.0
 description: "Hermes memory provider backed by Neo4j AuraDB via the official neo4j-agent-memory SDK (direct Bolt, no MCP). Hybrid retrieval, memory defense, core digest for use without built-in memory, read-only Cypher tool, dreaming loop."
 python_dependencies:
-  - "neo4j-agent-memory[sentence-transformers]"
+  - "neo4j-agent-memory[sentence-transformers]>=0.7.0,<0.8"
   - "httpx>=0.27"
 hooks:
   - prefetch

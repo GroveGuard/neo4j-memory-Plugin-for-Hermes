@@ -11,13 +11,13 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-SUITES = ["core", "cli_commands", "features", "standalone"]
+SUITES = ["core", "cli_commands", "features", "standalone", "recall"]
 
 
 def run_suite(name: str) -> bool:
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
-        for pkg in ("agent", "neo4j", "neo4j_agent_memory"):
+        for pkg in ("agent", "neo4j", "neo4j_agent_memory", "sentence_transformers"):
             shutil.copytree(HERE / "stubs" / pkg, work / pkg)
         (work / "plug").mkdir()
         (work / "plug_dir").mkdir()
@@ -25,6 +25,7 @@ def run_suite(name: str) -> bool:
         shutil.copy(ROOT / "cli.py", work / "plug" / "cli_plugin.py")
         shutil.copy(ROOT / "__init__.py", work / "plug_dir" / "__init__.py")
         shutil.copy(ROOT / "cli.py", work / "plug_dir" / "cli.py")
+        shutil.copy(ROOT / "plugin.yaml", work / "plugin.yaml")
         shutil.copy(HERE / "suites" / f"{name}.py", work / "suite.py")
         proc = subprocess.run([sys.executable, "suite.py"], cwd=work, capture_output=True, text=True)
         lines = [l for l in proc.stdout.splitlines() if l.strip()]

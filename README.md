@@ -1,4 +1,4 @@
-# neo4j-memory (Hermes memory provider) v0.5.2
+# neo4j-memory (Hermes memory provider) v0.6.0
 
 Direct Bolt connection to Neo4j AuraDB through the official `neo4j-agent-memory` SDK.
 No MCP, no `npx`, no runtime edits of `plugin.yaml`.
@@ -55,7 +55,7 @@ file, tells you whether the built-in stores are off and warns about that toolset
 
 | Built-in feature | Replacement here |
 |---|---|
-| Frozen snapshot in the system prompt | **Core digest**: `hermes neo4j-memory digest --write` (also the last step of the dreaming job) writes `$HERMES_HOME/neo4j-memory-digest.md` from the graph: the profile's preferences (`user:profile` scope), minus entries that only repeat `USER.md` (token overlap) and categories in `NEO4J_MEMORY_DIGEST_EXCLUDE`; optionally the N best-connected entities (`NEO4J_MEMORY_DIGEST_TOPICS`, default 0, because hubs are often import artefacts). Size cap `NEO4J_MEMORY_DIGEST_CHARS` (1500). It is read from the local file at session start (no network, stable prompt prefix) and used when MEMORY.md is off (or `NEO4J_MEMORY_DIGEST=1`). It changes between sessions, like the built-in snapshot |
+| Frozen snapshot in the system prompt | **Core digest**: `hermes neo4j-memory digest --write` (also the last step of the dreaming job) writes `$HERMES_HOME/neo4j-memory-digest.md` from the graph: the profile's preferences (`user:profile` scope), minus entries that only repeat `USER.md` (token overlap) and categories in `NEO4J_MEMORY_DIGEST_EXCLUDE`; optionally the N best-connected entities (`NEO4J_MEMORY_DIGEST_TOPICS`, default 0, because hubs are often import artefacts). Size cap `NEO4J_MEMORY_DIGEST_CHARS` (1500). It is read from the local file at session start (no network, stable prompt prefix). `NEO4J_MEMORY_DIGEST=1` always uses it, `0` never; unset = when MEMORY.md is off. `NEO4J_MEMORY_DIGEST_CATEGORIES=communication,style` limits it to behaviour rules (facts belong in query-driven recall, not in every prompt). It changes between sessions, like the built-in snapshot |
 | Security scan | **Memory defense** on every write (`remember`, `update`, mirrored writes, optional raw turns) and again on recall/digest: secrets are redacted (private keys, AWS/GitHub/Slack/OpenAI-style keys, JWT, bearer tokens, connection strings, `password=`/`token=` assignments, IBAN with checksum, credit cards with Luhn), invisible Unicode is stripped, prompt-injection/exfiltration phrases (EN/DE) are blocked. `NEO4J_MEMORY_DEFENSE=redact` (default) / `block` / `off`; `NEO4J_MEMORY_DEFENSE_PII=1` also redacts e-mail addresses and phone numbers. Pattern lists are heuristics, not a guarantee |
 | Prompt wording | In standalone mode the system prompt tells the agent to save proactively (user profile, people, projects, decisions, corrections) and to skip trivia |
 | Background review writes | See below |
@@ -100,15 +100,28 @@ Not adopted: `SimpleKGPipeline` (LLM extraction inside the plugin; the nightly a
 
 Upgrading from 0.3.x: nothing to migrate. On first connect the plugin creates the full-text index (it fills in the background; `hermes neo4j-memory stats` shows its state) and starts tagging new entities with provenance. Check the SDK's full-text support on your instance with `stats`.
 
-## Recall (`prefetch`)
-* Entities from the hybrid search (vector + keywords), merged-away duplicates filtered out. `get_context` is only used for recent messages when `NEO4J_MEMORY_STORE_MESSAGES=1`.
-* One-hop relationships of the top 3 entities: `→ WORKS_AT Acme`, `← Bob MANAGES`; expired relations hidden.
-* Preferences ranked by relevance (German/English stems, umlaut-folded). Categories in
-  `NEO4J_MEMORY_ALWAYS_CATEGORIES` (default: communication, style, language, format, tone, kommunikation,
-  sprache, stil, formatierung, ton) are always included (max 2). Mirrored built-in notes (`hermes_*`) are
-  not injected again (Hermes already puts the built-in memory in the prompt).
-* Budget `NEO4J_MEMORY_MAX_CHARS` (default 1200). One attempt, 6 s timeout, skipped for smalltalk, while
-  connecting, and for 60 s after 3 consecutive failures.
+## Recall (`prefetch`): query driven, after Hindsight
+No fixed slice of the memory goes into every prompt (apart from the optional digest, see below). Before each turn the plugin
+searches with the user's message and injects only what is relevant, with a small budget:
+
+| Step | What happens | Knob |
+|---|---|---|
+| Candidates | vector search **and** full-text search over entities, fused by reciprocal-rank fusion; merged-away duplicates removed | `NEO4J_MEMORY_HYBRID`, `NEO4J_MEMORY_MIN_SIMILARITY` |
+| Relevance floor | keyword-only hits scoring below 40 % of the best keyword hit are dropped (the vector channel has its own similarity threshold) | `NEO4J_MEMORY_MIN_TEXT_SCORE` |
+| Optional reranker | a cross-encoder scores (question, entity) pairs; candidates below the floor are dropped, so an unrelated question injects **nothing** (Hindsight's `recall_min_scores`) | `NEO4J_MEMORY_RERANKER` (model name, default off), `NEO4J_MEMORY_RERANK_MIN` (0.25) |
+| Budget | `low` / `mid` / `high`: 3/5/8 entities, 2/3/5 relations each, 3/5/8 preferences, 700/1200/2400 characters | `NEO4J_MEMORY_RECALL_BUDGET`, `NEO4J_MEMORY_MAX_CHARS` |
+| Timing | default: recall for the current message (6 s timeout, skipped while connecting and for 60 s after 3 failures). `NEO4J_MEMORY_RECALL_SYNC=0`: never wait, use the recall prepared after the previous turn (Hindsight's default) | `NEO4J_MEMORY_RECALL_SYNC` |
+
+Preferences are ranked by relevance (German/English stems, umlaut-folded); categories in `NEO4J_MEMORY_ALWAYS_CATEGORIES`
+(communication, style, language, ...) are always included (max 2); mirrored built-in notes (`hermes_*`) are not injected again.
+One-hop relations of the top entities are listed (`→ WORKS_AT Acme`, `← Bob MANAGES`); expired relations are hidden. The explicit
+`neo4j_memory_search` tool applies no floors (the agent asked for it) and says "do not guess" when nothing matches.
+
+**Tuning with real data:** `hermes neo4j-memory recall "<question>"` prints the settings, every candidate with its scores
+(vector similarity, keyword score, reranker score), whether it was kept and why not, and the exact text that would be injected.
+The default floors are conservative guesses, not measured values: run it with 10-20 real questions (related and unrelated) and adjust.
+A reranker is untested against a real model here; a multilingual cross-encoder is needed for German (for example
+`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`, unverified suggestion). Score scales differ per model, so calibrate `NEO4J_MEMORY_RERANK_MIN`.
 
 ## Dreaming loop (nightly consolidation)
 Two layers, both opt-in to the cron scheduler Hermes already has:
@@ -158,6 +171,25 @@ else from `.../profiles/<name>`, else `default`. Entities are shared across prof
 ## Not included
 Automatic extraction inside the plugin (the nightly agent job does it), relationship delete/update tools,
 export/backup, entity scoping per profile.
+
+## Conformance with Hermes' "Memory Provider Plugins" guide
+Checked against the developer guide (`tests/suites/recall.py` asserts what can be asserted against stubs).
+
+| Requirement | Status |
+|---|---|
+| `name`, `is_available()` without network, `initialize(session_id, **kwargs)` tolerant of missing kwargs (`hermes_home`, `agent_context`, `user_id`, `agent_identity`), `get_tool_schemas`, `handle_tool_call`, `get_config_schema`, `save_config(values, hermes_home)`, `system_prompt_block`, `prefetch`, `queue_prefetch`, `sync_turn`, `on_memory_write(action, target, content, metadata)`, `shutdown`, `register(ctx)` | implemented, signatures tested |
+| `plugin.yaml` with `python_dependencies` and the hooks actually implemented | yes; the SDK is pinned to `>=0.7.0,<0.8` (the range the code was written against; `client.graph` is announced to be replaced, so unreviewed minor releases are not pulled in) |
+| Threads only via `spawn_context_thread`, never a bare `threading.Thread` | yes (tested); credentials are resolved once in `initialize()` so the event-loop thread does not depend on a per-turn secret scope |
+| Profile isolation: paths from the `hermes_home` kwarg | sidecar, digest, vocabulary and `config.yaml` are read from the provider's own home; the sidecar comes from the kwarg (tested) |
+| Non-primary contexts (`cron`, `subagent`, `flush`): no automatic writes | `sync_turn` and the built-in mirror are skipped; explicit tool calls still work |
+| Mirroring built-in writes: skip destructive actions when `previous_content` is missing | `remove` is skipped without it, `replace` only adds (tested) |
+| Prefetch stays far below Hermes' ceiling | 700-2400 characters, cached for 120 s |
+| Secrets via `.env`, non-secret settings via `save_config`; never write `config.yaml` | yes |
+| `cli.py` with `register_cli` | yes |
+| Optional `on_session_end`, `on_pre_compress` | not implemented on purpose: the plugin has no LLM; extraction is done by the dreaming job |
+| Optional `post_setup`, `get_status_config()`, dashboard `config_schema.py` | not implemented: the guide does not specify their formats; `hermes neo4j-memory status` covers the checks. The dashboard panel therefore has no schema file |
+| `ctx.register_skill`, `utils.atomic_json_write` / `read_json_or_empty`, checkpoint API v2 | not used (own atomic write, no skills, no transcript archive) |
+| Contract tests against the real `MemoryManager` | not run: no Hermes installation in the build environment, tests use stubs |
 
 ## Development
 Work happens in the GitHub repo (`GroveGuard/neo4j-memory-Plugin-for-Hermes`). The tests run against stubs of Hermes,

@@ -5,6 +5,7 @@
   dream         duplicate report; --apply merges the safe (exact-name) pairs
   reembed       recompute entity vectors after an embedding-model change
   digest        build the always-on core digest for the system prompt (--write to save)
+  recall        show what automatic recall would inject for a question, and why candidates were dropped
   query         read-only Cypher (no argument = schema + examples)
   install-cron  create (or --update) the nightly dreaming job in Hermes' cron scheduler
   merge / reject / search / tool   the same operations the agent tools offer, for cron agents
@@ -105,6 +106,10 @@ def _builtin_report() -> None:
               "memory providers. Remove it there and set memory.memory_enabled: false and "
               "memory.user_profile_enabled: false instead.")
     digest = home / core.DIGEST_FILE
+    mode = core._env("NEO4J_MEMORY_DIGEST").lower()
+    if mode in ("0", "false", "off", "no"):
+        print("Core digest: disabled (NEO4J_MEMORY_DIGEST=0)")
+        return
     if not mem_on:
         print("Core digest: " + (f"{digest.stat().st_size} bytes, updated "
                                  f"{__import__('datetime').datetime.fromtimestamp(digest.stat().st_mtime):%Y-%m-%d %H:%M}"
@@ -259,6 +264,28 @@ def _digest(args) -> None:
         provider.shutdown()
 
 
+def _recall(args) -> None:
+    provider = _provider(args)
+    try:
+        res = provider.cli_recall(args.question)
+        st = res["settings"]
+        print(f"Question: {res['query']}")
+        print(f"Settings: budget={st['budget']} {st['limits']} max_chars={st['max_chars']} | min similarity={st['min_similarity']} | "
+              f"keyword floor={st['min_text_score']} | reranker={st['reranker']} (floor {st['rerank_min']}) | "
+              f"recall_sync={st['recall_sync']} | hybrid={st['hybrid']}")
+        print("Candidates:")
+        if not res["candidates"]:
+            print("  (none: nothing matched; automatic recall would inject no entities)")
+        for c in res["candidates"]:
+            mark = "KEEP" if c["kept"] else "drop"
+            scores = ", ".join(f"{k}={v}" for k, v in (("similarity", c["similarity"]), ("keyword", c["text_score"]), ("rerank", c["rerank"])) if v is not None)
+            print(f"  {mark}  {c['name']} ({c['type']})  via {c['match']}  [{scores}]" + (f"  <- {c['reason']}" if c.get("reason") else ""))
+        print(f"\nInjected text ({len(res['text'])} chars):")
+        print(res["text"] or "(nothing is injected for this question)")
+    finally:
+        provider.shutdown()
+
+
 def _query_cmd(args) -> None:
     provider = _provider(args)
     try:
@@ -323,7 +350,7 @@ def _dispatch(args) -> None:
     {
         "status": _status, "stats": _stats, "dream": _dream, "reembed": _reembed,
         "install-cron": _install_cron, "merge": _merge, "reject": _reject,
-        "search": _search, "tool": _tool, "query": _query_cmd, "digest": _digest,
+        "search": _search, "tool": _tool, "query": _query_cmd, "digest": _digest, "recall": _recall,
     }.get(getattr(args, "neo4j_memory_cmd", None) or "status", _status)(args)
 
 
@@ -354,6 +381,8 @@ def register_cli(subparser) -> None:
     digest = with_user(subs.add_parser("digest", help="Build the core digest for the system prompt"))
     digest.add_argument("--write", action="store_true", help="save it (default: preview only)")
     digest.add_argument("--profiles", default="", help="comma list of profiles (default: NEO4J_MEMORY_DIGEST_PROFILES or this one)")
+    recall = with_user(subs.add_parser("recall", help="Show what automatic recall injects for a question"))
+    recall.add_argument("question")
     query = with_user(subs.add_parser("query", help="Read-only Cypher; without an argument: schema and examples"))
     query.add_argument("cypher", nargs="?", default="")
     query.add_argument("--params", default="", help='JSON object, e.g. \'{"name": "Maya"}\'')
