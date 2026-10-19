@@ -1,4 +1,4 @@
-"""Neo4j memory provider for Hermes Agent (v0.6.0).
+"""Neo4j memory provider for Hermes Agent (v0.6.1).
 
 Talks directly to Neo4j (AuraDB) through the official ``neo4j-agent-memory``
 SDK over Bolt. No MCP layer, no ``npx`` server, no runtime patching of
@@ -96,14 +96,17 @@ from agent.memory_provider import MemoryProvider, spawn_context_thread
 
 try:  # secret scope is the supported way to read credentials inside Hermes
     from agent.secret_scope import get_secret
+    _HAVE_SECRET_SCOPE = True
 except Exception:  # pragma: no cover - older Hermes / standalone testing
+    _HAVE_SECRET_SCOPE = False
+
     def get_secret(name: str) -> Optional[str]:  # type: ignore[misc]
         return os.environ.get(name)
 
 logger = logging.getLogger(__name__)
 
 PROVIDER_NAME = "neo4j-memory"
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 ENTITY_TYPES = ["PERSON", "ORGANIZATION", "LOCATION", "EVENT", "OBJECT"]  # POLE+O
 
 DEFAULT_EMBEDDING = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # 384 dims, de+en
@@ -122,6 +125,10 @@ CACHE_TTL = 120.0
 
 SIDECAR_FILE = "neo4j-memory.json"
 SIDECAR_KEYS = {"NEO4J_URI": "uri", "NEO4J_USERNAME": "username", "NEO4J_DATABASE": "database"}
+# Connection settings are read ONLY through Hermes' profile-aware resolver (agent.secret_scope.get_secret). It already
+# falls back to the process environment in a single-profile process, and it fails closed under multiplexing; a bare
+# os.environ read here would hand one profile the credentials of another (Hermes catalog rule 11).
+CONNECTION_NAMES = {"NEO4J_PASSWORD", "NEO4J_USERNAME", "NEO4J_URI", "NEO4J_DATABASE"}
 
 DEFAULT_ALWAYS_CATEGORIES = (
     "communication,style,language,format,tone,kommunikation,sprache,stil,formatierung,ton"
@@ -258,9 +265,10 @@ def _env(name: str, default: str = "", home: Optional[Path] = None) -> str:
     """Resolve a setting: secret scope / environment (.env) first, then the setup sidecar (of `home`, if given)."""
     try:
         value = get_secret(name)
-    except Exception:
+    except Exception:          # multiplexed gateway without a scope: fail closed, do not fall back to os.environ
         value = None
-    value = value or os.environ.get(name)
+    if not (name in CONNECTION_NAMES and _HAVE_SECRET_SCOPE):
+        value = value or os.environ.get(name)
     if not value and name in SIDECAR_KEYS:
         value = _read_sidecar(home).get(SIDECAR_KEYS[name])
     return str(value or default).strip()
@@ -1657,7 +1665,7 @@ class Neo4jMemoryProvider(MemoryProvider):
         messages: List[Any] = []
         if self._store_messages:
             ctx = await client.get_context(
-                query, session_id=session_id or None, limit=5, include_short_term=True,
+                query, session_id=session_id or None, max_items=5, include_short_term=True,
                 include_long_term=False, include_reasoning=False)
             messages = list(getattr(ctx, "messages", None) or [])
         objs: List[Any] = []

@@ -64,7 +64,7 @@ ok(rep["identity"] == "me:clippy", "NEO4J_MEMORY_USER wins over --user (same rul
 print("== install-cron")
 out = run(["install-cron"]); ok("cron create" in out and "terminal" in out.lower() or "hermes neo4j-memory dream --json" in out, "dry run create shows CLI-based prompt")
 out = run(["install-cron", "--update", "--hour", "2"]); ok("cron edit neo4j-memory-dream" in out and "30 2 * * *" in out and "Dry run" in out, "dry run --update shows the edit command")
-core = sys.modules["neo4j_memory_core"]
+core = cli._core()
 ok("ENTIRE reply must be exactly [SILENT]" in core.DREAM_PROMPT and "--args-file" in core.DREAM_PROMPT and "do NOT" not in core.DREAM_PROMPT.lower() or True, "prompt demands bare [SILENT]")
 ok("USE THE TOOLS IF YOU HAVE THEM" in core.DREAM_PROMPT and "hermes neo4j-memory merge" in core.DREAM_PROMPT and "hermes neo4j-memory reject" in core.DREAM_PROMPT and "neo4j_memory_maintain" in core.DREAM_PROMPT, "prompt prefers tools, lists CLI fallbacks")
 print(f"\nALL {n} NEW CHECKS PASSED")

@@ -146,6 +146,7 @@ ok(cfgd["uri"] == "neo4j+s://from-sidecar" and cfgd["username"] == "su" and cfgd
 import yaml
 manifest = yaml.safe_load(open("plugin.yaml", encoding="utf-8"))
 deps = " ".join(manifest["python_dependencies"])
-ok(manifest["name"] == "neo4j-memory" and "neo4j-agent-memory" in deps and ">=0.7.0,<0.8" in deps, "plugin.yaml pins the SDK to a reviewed range")
+ok(manifest["name"] == "neo4j-memory" and "neo4j-agent-memory" in deps and ">=0.4.0,<0.8" in deps, "plugin.yaml pins the SDK to a contract-checked range (floor and upper bound)")
+ok(all(("<" in d or "," in d) or d.startswith("neo4j-agent-memory") for d in manifest["python_dependencies"]) and "httpx" not in deps, "no unused dependency and no bare floor")
 ok(set(manifest["hooks"]) == {"prefetch", "queue_prefetch", "sync_turn", "on_memory_write", "shutdown"} and all(hasattr(P, h) for h in manifest["hooks"]), "plugin.yaml hooks match the implemented methods")
 print(f"\nALL {n} RECALL/CONFORMANCE CHECKS PASSED")

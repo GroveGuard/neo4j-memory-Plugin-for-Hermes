@@ -1,4 +1,4 @@
-# neo4j-memory (Hermes memory provider) v0.6.0
+# neo4j-memory (Hermes memory provider) v0.6.1
 
 Direct Bolt connection to Neo4j AuraDB through the official `neo4j-agent-memory` SDK.
 No MCP, no `npx`, no runtime edits of `plugin.yaml`.
@@ -178,7 +178,7 @@ Checked against the developer guide (`tests/suites/recall.py` asserts what can b
 | Requirement | Status |
 |---|---|
 | `name`, `is_available()` without network, `initialize(session_id, **kwargs)` tolerant of missing kwargs (`hermes_home`, `agent_context`, `user_id`, `agent_identity`), `get_tool_schemas`, `handle_tool_call`, `get_config_schema`, `save_config(values, hermes_home)`, `system_prompt_block`, `prefetch`, `queue_prefetch`, `sync_turn`, `on_memory_write(action, target, content, metadata)`, `shutdown`, `register(ctx)` | implemented, signatures tested |
-| `plugin.yaml` with `python_dependencies` and the hooks actually implemented | yes; the SDK is pinned to `>=0.7.0,<0.8` (the range the code was written against; `client.graph` is announced to be replaced, so unreviewed minor releases are not pulled in) |
+| `plugin.yaml` with `python_dependencies` and the hooks actually implemented | yes; `neo4j-agent-memory[sentence-transformers]>=0.4.0,<0.8`: floor = oldest version whose API the plugin uses (checked with `tests/api_contract.py`, signatures only), upper bound = the next unreviewed minor release (`client.graph` is announced to be replaced). `httpx` is not declared (the SDK needs it only for its hosted `nams` backend, which this plugin does not use) |
 | Threads only via `spawn_context_thread`, never a bare `threading.Thread` | yes (tested); credentials are resolved once in `initialize()` so the event-loop thread does not depend on a per-turn secret scope |
 | Profile isolation: paths from the `hermes_home` kwarg | sidecar, digest, vocabulary and `config.yaml` are read from the provider's own home; the sidecar comes from the kwarg (tested) |
 | Non-primary contexts (`cron`, `subagent`, `flush`): no automatic writes | `sync_turn` and the built-in mirror are skipped; explicit tool calls still work |
@@ -190,6 +190,54 @@ Checked against the developer guide (`tests/suites/recall.py` asserts what can b
 | Optional `post_setup`, `get_status_config()`, dashboard `config_schema.py` | not implemented: the guide does not specify their formats; `hermes neo4j-memory status` covers the checks. The dashboard panel therefore has no schema file |
 | `ctx.register_skill`, `utils.atomic_json_write` / `read_json_or_empty`, checkpoint API v2 | not used (own atomic write, no skills, no transcript archive) |
 | Contract tests against the real `MemoryManager` | not run: no Hermes installation in the build environment, tests use stubs |
+
+## SDK compatibility
+The plugin calls the SDK in many places. `python tests/api_contract.py [wheel ...]` parses the SDK source (installed package or
+given wheels, no imports) and checks that every method, parameter name and `MemorySettings` field the plugin uses exists, and that every
+call site in `__init__.py` fits the real signature. Result for 0.4.0, 0.5.0, 0.6.0 and 0.7.0: ok; 0.2.x lacks the embedding
+provider API and `MemorySettings.backend`. It does not run the SDK, so behaviour differences between versions are untested. Run it in
+Hermes' Python after every SDK upgrade. (It found a real bug: `MemoryClient.get_context` takes `max_items`, not `limit`; the stubs had hidden it.)
+
+## Disclosures (what to know before installing)
+- **Network:** the plugin talks to the Neo4j instance you configure (Bolt, `neo4j+s://`). The embedding model (and the optional reranker model)
+  are downloaded from the Hugging Face Hub on first use by `sentence-transformers`; the plugin itself makes no HTTP calls, no telemetry, no
+  usage reporting. Content you store (entities, relationships, preferences) goes to your Neo4j database; embeddings are computed locally.
+- **Credentials:** the Neo4j password (and URI/username/database) are read through `agent.secret_scope.get_secret`, never from files or a bare
+  `os.environ` read (fails closed under a multiplexed gateway). `hermes memory setup` stores the password in `.env`; the other values may be
+  kept in the plugin's own `neo4j-memory.json`. The plugin never stores or writes credentials.
+- **Reads outside its own data:** `config.yaml` (only `memory.*` and `agent.disabled_toolsets`, to adapt the prompt) and `memories/USER.md` of the
+  target profile (read-only, to keep the digest free of duplicates).
+- **Writes outside its own directory:** the digest file `neo4j-memory-digest.md` into the homes of the profiles listed in
+  `NEO4J_MEMORY_DIGEST_PROFILES` (existing profiles only, never created). Its own files (`neo4j-memory.json`, vocabulary, digest) live in the active home.
+- **Shell commands:** `hermes neo4j-memory install-cron --apply` runs `hermes cron create|edit` through `subprocess` (argument list, no shell) once, on your
+  explicit command. The agent tools never run shell commands.
+- **Background processes:** one event-loop thread and short-lived threads for prefetch, turn sync and built-in mirroring (all via `spawn_context_thread`).
+  The optional nightly job is a Hermes cron job you create; it runs an agent turn with the model and permissions of your Hermes configuration.
+- **Unattended runs:** nothing prompts; connection attempts have timeouts, back-off and a circuit breaker; the CLI refuses to wait on a terminal.
+- **Stored data:** conversation-derived facts you or the agent save, with provenance (`hermes_origin`, `hermes_session`, `hermes_learned_at`); secrets are
+  redacted and injection-like text is blocked before storing (heuristics, no guarantee).
+- **No self-update, no obfuscation, no binaries.** Not a fork; the Neo4j memory plugin `reverie` uses MCP and an `npx` server, this one the SDK directly.
+
+## Catalog submission status (Hermes "Submitting to the plugin catalog")
+Not submitted. What is checked here and what only the maintainer can do:
+
+| Rule | Status |
+|---|---|
+| 1 human-merged PR, 2 exact SHA pin, 4 SHA bumps, 5 owner submission | process: PR to `NousResearch/hermes-agent` adding `plugin-catalog/<name>.yaml` (draft: `catalog/neo4j-memory.yaml.example`), pinned to a pushed commit |
+| 3 no self-updating code | yes (nothing fetches or replaces plugin files) |
+| 6 capabilities match reality | open: for a memory provider the tools come from `get_tool_schemas()` (6 tools, `neo4j_memory_query` and `neo4j_memory_maintain` only in cron or with a flag). Fill `capabilities` from `hermes plugins validate` |
+| 7 install scanner | open: run `hermes plugins validate <path> --install-deps`. Expect two `caution`-style findings, both disclosed above (`subprocess`, fallback `exec_module`); `tests/lint_catalog.py` lists them |
+| 9 no core override | yes: no `sys.modules[...]` write, no `setattr`, no attribute assignment on Hermes modules (lint, with a regression test against the old `cli.py`) |
+| 10 dependencies | bounded range, oldest API-compatible floor, no unused dependency; no release quarantine in CI yet |
+| 11 credentials | via `get_secret`, fail closed (tested with a multiplexing stub) |
+| 12 approvals / unattended | no approval bypass; no waiting for a person |
+| 13 disclosures | section above; repeat it in the PR description |
+| 14 metadata | `version` matches; `requires_hermes: ">=0.21.5"` is the release this was run on, confirm against your Hermes |
+| 15 / 16 | not a skin or fork of a bundled plugin; architecture differs from `reverie` (MCP) |
+| 17 no binaries or bytecode | yes (lint) |
+| Names | **open:** a `memory` entry must not reuse the name of a well-known upstream project it is not affiliated with; `neo4j-memory` is close to Neo4j's own projects, a distinct key is safer (it also becomes `memory.provider` and the CLI name) |
+
+`python tests/lint_catalog.py` checks the statically checkable rules; it is not the official validator.
 
 ## Development
 Work happens in the GitHub repo (`GroveGuard/neo4j-memory-Plugin-for-Hermes`). The tests run against stubs of Hermes,

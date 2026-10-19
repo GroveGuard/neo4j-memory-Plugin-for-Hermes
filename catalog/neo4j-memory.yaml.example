@@ -1,0 +1,28 @@
+# Draft of the catalog entry (goes to NousResearch/hermes-agent as plugin-catalog/<name>.yaml).
+# NOT submitted. Fill <SHA> with the full 40-character commit you want listed, then run
+#   hermes plugins validate <path-to-this-repo> --install-deps
+# and make `capabilities` match what the validator reports for this memory provider.
+name: neo4j-memory                 # CHECK "Names" in plugin-catalog/README.md: a memory entry must not reuse the name of a
+                                   # well-known upstream project it is not affiliated with (Neo4j's own projects use this
+                                   # wording). A distinct key such as neo4j-graph-memory is safer; it also changes memory.provider.
+repo: https://github.com/GroveGuard/neo4j-memory-Plugin-for-Hermes
+sha: <40-hex commit sha>
+description: Neo4j (AuraDB) graph memory provider with hybrid vector + full-text recall, relevance floors, memory defense, a read-only Cypher tool and nightly consolidation.
+maintainer: GroveGuard
+tier: community
+category: memory
+requires_hermes: ">=0.21.5"
+docs_url: ""
+version: "0.6.1"
+readme: true
+platforms: []
+title: Neo4j Graph Memory
+known_issues:
+  - "First start downloads a ~470 MB local embedding model (Hugging Face Hub); an optional reranker model is a second download."
+  - "Needs your own Neo4j 5 / AuraDB instance; AuraDB Free pauses after inactivity, so the first call after a pause can fail once."
+  - "Changing the embedding model later requires `hermes neo4j-memory reembed`."
+capabilities:
+  provides_tools: []               # fill from the validator output (a memory provider's tools come from get_tool_schemas())
+  provides_hooks: []
+  provides_middleware: []
+  requires_env: [NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD]

@@ -11,7 +11,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-SUITES = ["core", "cli_commands", "features", "standalone", "recall"]
+SUITES = ["core", "cli_commands", "features", "standalone", "recall", "catalog"]
 
 
 def run_suite(name: str) -> bool:
@@ -26,6 +26,8 @@ def run_suite(name: str) -> bool:
         shutil.copy(ROOT / "__init__.py", work / "plug_dir" / "__init__.py")
         shutil.copy(ROOT / "cli.py", work / "plug_dir" / "cli.py")
         shutil.copy(ROOT / "plugin.yaml", work / "plugin.yaml")
+        shutil.copy(HERE / "lint_catalog.py", work / "lint_catalog.py")
+        shutil.copytree(HERE / "fixtures", work / "fixtures")
         shutil.copy(HERE / "suites" / f"{name}.py", work / "suite.py")
         proc = subprocess.run([sys.executable, "suite.py"], cwd=work, capture_output=True, text=True)
         lines = [l for l in proc.stdout.splitlines() if l.strip()]
@@ -38,6 +40,12 @@ def run_suite(name: str) -> bool:
         return ok
 
 
+def run_lint() -> bool:
+    proc = subprocess.run([sys.executable, str(HERE / "lint_catalog.py")], cwd=ROOT, capture_output=True, text=True)
+    print(f"{'ok  ' if proc.returncode == 0 else 'FAIL'} catalog lint: {proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else proc.stderr[-200:]}")
+    return proc.returncode == 0
+
+
 if __name__ == "__main__":
-    results = [run_suite(n) for n in SUITES]
+    results = [run_suite(n) for n in SUITES] + [run_lint()]
     sys.exit(0 if all(results) else 1)

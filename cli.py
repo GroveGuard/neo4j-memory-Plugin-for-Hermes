@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import datetime
 import json
 import os
 import shutil
@@ -23,27 +24,50 @@ from pathlib import Path
 _SIDECAR = {"NEO4J_URI": "uri", "NEO4J_USERNAME": "username", "NEO4J_DATABASE": "database"}
 
 
+_CORE = None
+
+
 def _core():
-    """Load the provider module that lives next to this file (same code Hermes runs)."""
+    """The provider module (this plugin's __init__.py).
+
+    Inside Hermes this file is imported as part of the plugin package, so the package module is simply imported (it is
+    the object Hermes already loaded). Only when run outside a package (tests, direct execution) the sibling file is
+    loaded under a private name and NOT added to Python's module table."""
+    global _CORE
+    if _CORE is not None:
+        return _CORE
+    import importlib
     import importlib.util
 
-    name = "neo4j_memory_core"
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name("__init__.py"))
+    if __package__:
+        try:
+            _CORE = importlib.import_module(__package__)
+            return _CORE
+        except Exception:
+            pass
+    spec = importlib.util.spec_from_file_location("neo4j_memory_core", Path(__file__).with_name("__init__.py"))
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
     spec.loader.exec_module(mod)
+    _CORE = mod
     return mod
 
 
+_CONNECTION = {"NEO4J_PASSWORD", "NEO4J_USERNAME", "NEO4J_URI", "NEO4J_DATABASE"}
+
+
 def _setting(name: str) -> str:
+    """Same rule as the provider: connection settings only via Hermes' profile-aware get_secret (never bare os.environ)."""
+    scoped_ok = True
     try:
         from agent.secret_scope import get_secret
         value = get_secret(name)
+    except ImportError:
+        scoped_ok = False
+        value = os.environ.get(name)         # standalone use without Hermes
     except Exception:
-        value = None
-    value = value or os.environ.get(name)
+        value = None                          # fail closed (multiplexed, no scope)
+    if not (name in _CONNECTION and scoped_ok):
+        value = value or os.environ.get(name)
     if not value and name in _SIDECAR:
         try:
             from hermes_constants import get_hermes_home
@@ -112,7 +136,7 @@ def _builtin_report() -> None:
         return
     if not mem_on:
         print("Core digest: " + (f"{digest.stat().st_size} bytes, updated "
-                                 f"{__import__('datetime').datetime.fromtimestamp(digest.stat().st_mtime):%Y-%m-%d %H:%M}"
+                                 f"{datetime.datetime.fromtimestamp(digest.stat().st_mtime):%Y-%m-%d %H:%M}"
                                  if digest.exists() else "not created yet (run `hermes neo4j-memory digest --write`)"))
 
 
@@ -303,8 +327,10 @@ def _tool(args) -> None:
             raw = Path(args.args_file).read_text(encoding="utf-8-sig")
         elif args.args:
             raw = args.args
-        else:
+        elif sys.stdin is not None and not sys.stdin.isatty():
             raw = sys.stdin.read()
+        else:          # never wait for a person (cron / gateway / agent terminal): fail cleanly
+            raise ValueError("no JSON given and stdin is a terminal")
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             raise ValueError("JSON must be an object")

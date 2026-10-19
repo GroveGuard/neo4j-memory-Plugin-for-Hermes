@@ -177,10 +177,14 @@ class MemoryClient:
         self.short_term = _ST(); self.graph = _Graph(self.store); MemoryClient.last = self
     async def __aenter__(self): await asyncio.sleep(0.1); return self
     async def __aexit__(self, *a): self.closed = True
-    async def get_context(self, q, session_id=None, **kw):
+    async def get_context(self, query, session_id=None, include_short_term=True, include_long_term=True,
+                          include_reasoning=True, max_items=10):
+        """Real SDK signature (0.4.0 - 0.7.0): any other keyword raises TypeError, like the real client."""
         MemoryClient.context_calls += 1
         if MemoryClient.fail: raise RuntimeError("db down")
-        self.ctx_kwargs = kw
-        words = [w for w in q.lower().split() if len(w) > 2]
-        ents = [e for e in self.store.ents if any(w.strip("?!.,") in e.name.lower() for w in words)]   # merged ones included, like the real SDK
-        return MemoryContext(entities=ents[:kw.get("limit", 10)])
+        self.ctx_kwargs = dict(include_short_term=include_short_term, include_long_term=include_long_term,
+                               include_reasoning=include_reasoning, max_items=max_items, limit=max_items)
+        words = [w for w in query.lower().split() if len(w) > 2]
+        ents = [e for e in self.store.ents if any(w.strip("?!.,") in e.name.lower() for w in words)] if include_long_term else []
+        msgs = [NS(role=m[1], content=m[2]) for m in self.short_term.msgs[-max_items:]] if include_short_term else []
+        return MemoryContext(entities=ents[:max_items], messages=msgs)
